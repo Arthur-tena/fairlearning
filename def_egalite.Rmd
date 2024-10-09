@@ -1,0 +1,151 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Dans ce notebook, nous regarderons l'équité dans le jeu de donnée COMPAS suivant les 2 définitions vu dans le document, la parité démographique et l'égalité des chances. Puis nous utiliserons une méthode de pré-processing pour atténuer le biais et voir l'influence sur les concepts d'équité.
+
+# Chargement des données :
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(glmnet)
+data=read.csv("compas-scores-two-years.csv")
+```
+
+
+```{r}
+compas <- data %>%
+  select(sex, decile_score, two_year_recid, priors_count, is_recid) %>%
+  mutate(sex = factor(sex, levels = c("Male", "Female")),
+         risk_high = ifelse(decile_score > 7, 1, 0))
+compas_gender <- compas %>% select(sex, risk_high)
+```
+
+# Etude des définitions
+
+Nous nous concentrerons dans cette étude à quelques co-variables que nous avons sélectionnée.
+- *sex* : le genre de la personne.
+- *decile_score* : le score donné par l'algorithme allant de 1 à 10 où 1 représente un risque faible de récidive et 10 un risque très élevé.
+- *two_year_recid* : indicatrice codant 1 si la personne a récidivé dans les 2 ans qui ont suivi sa libération et 0 sinon.
+- *priors_count* : le nombre de fois que la personne a commis un délit avant cette condamnation.
+- *is_recid* : indicatrice codant 1 si la personne a récidivé et 0 sinon.
+
+Nous avons ensuite définit qu'un risque de récidive était élevé si si son *decile_score* était supérieur à 7, c'est la variable qui nous intéressera.
+
+## Parité démographique :
+
+Nous définissons ainsi la parité démographique :
+
+```{r}
+parite_demographique <- compas_gender %>%
+  group_by(sex) %>%
+  summarise(probability_high_risk = mean(risk_high == 1))
+```
+
+
+```{r}
+ggplot(parite_demographique, aes(x = sex, y = probability_high_risk, fill = sex)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Parité démographique par sexe") +
+  ylab("Probabilité d'un risque élevé")
+```
+
+La parité démographique n'est pas respectée. On le remarque car les 2 barres ne sont pas égale.
+
+## Egalité des chances
+
+Nous utiliserons pour voir l'égalité des chances un modèle linéaire généralisé utilisant de la régression logistique.
+
+```{r}
+egalite_chances <- glm(risk_high ~ sex + priors_count + is_recid + two_year_recid, 
+                              family = "binomial", data = compas)
+
+summary(egalite_chances)
+```
+
+Nous voyons alors que le sexe est un facteur légérement significatif car ayant une p-value de l'odre de 0.05. Ce qui indique une nouvelle fois qu'une femme à moins de chance d'avoir un score élevé qu'un homme. 
+Nous allons regarder le taux de faux positif et vrai positif suivant le sexe.
+Un faux positif serait donc dans notre cas une personne ayant un score élevé (risk_high valant 1) et une récidive au bout de 2 ans (two_year_recid valant 0). 
+
+```{r}
+compas %>%
+  group_by(sex) %>%
+  summarise(
+    true_positive_rate = mean(risk_high == 1 & two_year_recid == 1),
+    false_positive_rate = mean(risk_high == 1 & two_year_recid == 0)
+  ) %>%
+  ggplot(aes(x = sex)) +
+  geom_bar(aes(y = true_positive_rate, fill = "True Positive Rate"), stat = "identity") +
+  geom_bar(aes(y = false_positive_rate, fill = "False Positive Rate"), stat = "identity") +
+  labs(title = "Égalité des chances ajustée : taux de vrais et faux positifs",
+       y = "Taux", fill = "fill") +
+  theme_minimal()
+```
+
+Le taux de faux positifs est équivalent alors que le taux de vrai postif est 
+
+
+```{r}
+control <- exp(-2.563821) / (1 + exp(-2.563821))
+1-exp(-0.199376) / (1 - control + (control * exp(-0.199376)))
+```
+
+Les femmes ont environ 17% de chance de moins d'avoir un score élevé.
+
+## Conclusion
+Le data set COMPAS ne respecte aucune des 2 définitions de l'équité.
+
+# Amélioration ?  pré processing 
+Une façon de réduire le biais est l'optimized pré-processing. C'est une méthode consistant à modifier légèrement les données pour atténuer le biais.
+Ici, nous choisissons d'augmenter le decile_score de 1 si une femme a un decile_score inférieur à 5.
+```{r}
+preprocess_data <- function(data) {
+  data <- data %>%
+    mutate(
+      decile_score = ifelse(sex == "Female" & decile_score < 5, decile_score + 1, decile_score)
+    )%>%
+    mutate(
+      risk_high = ifelse(decile_score > 5, 1, 0)
+    )
+  
+  data$decile_score <- pmin(data$decile_score, 10)
+  
+  return(data)
+}
+
+compas2=preprocess_data(compas)
+```
+
+# Parité démographique 
+
+```{r}
+parite_demographique <- compas2 %>%
+  group_by(sex) %>%
+  summarise(probability_high_risk = mean(risk_high == 1))
+ggplot(parite_demographique, aes(x = sex, y = probability_high_risk, fill = sex)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Parité démographique par sexe (decile_score)") +
+  ylab("Probabilité d'un risque élevé")
+```
+La parité démographique n'est toujours pas vérifié, une femme et un homme n'auront pas la même probabilité d'avoir un score élevé.
+
+## Egalité des chances 
+
+```{r}
+model_equality_chances <- glm(risk_high ~ sex + priors_count + is_recid + two_year_recid, 
+                              family = "binomial", data = compas2)
+
+summary(model_equality_chances)
+```
+
+Nous voyons cette fois que la variabkle de sexe n'est plus significatif. L'égalité des chances est donc vérifié.
+
+
+# Conclusion :
+Avec le jeu de donnée "brut" (sans l'avoir débiaisé avec la méthode d'optimisation pré-processing) nous voyons 2 choses :
+- La parité démographique n'est pas totalement respectée car les hommes sont plus souvent classés à risque élevé que les femmes.
+- l'égalité des chances n'est pas vérifiée car la variable de genre est significative.
+Cela suggère que l'algorithme COMPAS pourrait être biaisé en fonction du sexe.
+Une fois que nous avons débiaisé le jeu de donnée, nous voyons que la parité démographique n'est toujours pas respectée alors que l'égalité des chances l'est. 
