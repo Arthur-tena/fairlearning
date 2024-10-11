@@ -1,6 +1,8 @@
 ---
 title: "R Notebook"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 ---
 
 Dans ce notebook, nous regarderons l'équité dans le jeu de donnée COMPAS suivant les 2 définitions vu dans le document, la parité démographique et l'égalité des chances. Puis nous utiliserons une méthode de pré-processing pour atténuer le biais et voir l'influence sur les concepts d'équité.
@@ -21,6 +23,7 @@ compas <- data %>%
   mutate(sex = factor(sex, levels = c("Male", "Female")),
          risk_high = ifelse(decile_score > 7, 1, 0))
 compas_gender <- compas %>% select(sex, risk_high)
+
 ```
 
 # Etude des définitions
@@ -52,7 +55,7 @@ ggplot(parite_demographique, aes(x = sex, y = probability_high_risk, fill = sex)
   ylab("Probabilité d'un risque élevé")
 ```
 
-La parité démographique n'est pas respectée. On le remarque car les 2 barres ne sont pas égale.
+La parité démographique n'est pas respectée. On le remarque car les 2 barres ne sont pas égale, la proportion d'homme ayant un risque élevé est différent de la proportion de femme.
 
 ## Egalité des chances
 
@@ -84,12 +87,13 @@ compas %>%
   theme_minimal()
 ```
 
-Le taux de faux positifs est équivalent alors que le taux de vrai postif est 
+
+Le taux de faux positifs est équivalent alors que le taux de vrai postif est différent, l'égalité des chances n'est donc pas respecté 
 
 
 ```{r}
-control <- exp(-2.563821) / (1 + exp(-2.563821))
-1-exp(-0.199376) / (1 - control + (control * exp(-0.199376)))
+control <- exp(egalite_chances$coefficients[1]) / (1 + exp(egalite_chances$coefficients[1]))
+1-exp(egalite_chances$coefficients[2]) / (1 - control + (control * exp(egalite_chances$coefficients[2])))
 ```
 
 Les femmes ont environ 17% de chance de moins d'avoir un score élevé.
@@ -99,38 +103,46 @@ Le data set COMPAS ne respecte aucune des 2 définitions de l'équité.
 
 # Amélioration ?  pré processing 
 Une façon de réduire le biais est l'optimized pré-processing. C'est une méthode consistant à modifier légèrement les données pour atténuer le biais.
-Ici, nous choisissons d'augmenter le decile_score de 1 si une femme a un decile_score inférieur à 5.
+Ici, nous choisissons d'augmenter le decile_score de 1 si une femme a un decile_score inférieur à 6 et de diminuer le decile_score de 1 si un homme a un decile score supérieur à 6.
+
+# Parité démographique 
+
 ```{r}
-preprocess_data <- function(data) {
+pre_processing <- function(data) {
   data <- data %>%
     mutate(
-      decile_score = ifelse(sex == "Female" & decile_score < 5, decile_score + 1, decile_score)
-    )%>%
+      decile_score = ifelse(sex == "Female" & decile_score < 6, decile_score + 1, decile_score)
+    ) %>%
     mutate(
-      risk_high = ifelse(decile_score > 5, 1, 0)
+      decile_score = ifelse(sex == "Male" & decile_score > 6, decile_score - 1, decile_score)
+    ) %>%
+    mutate(
+      risk_high = ifelse(decile_score > 7, 1, 0) 
     )
   
   data$decile_score <- pmin(data$decile_score, 10)
   
   return(data)
 }
-
-compas2=preprocess_data(compas)
+compas2=pre_processing(compas)
+ggplot(compas2, aes(x = decile_score, fill = sex)) +
+  geom_histogram(binwidth = 1, position = "identity", alpha = 0.5) +
+  labs(title = "Distribution des scores de décile par sexe", x = "Score de décile", y = "Fréquence") +
+  theme_minimal()
 ```
 
-# Parité démographique 
 
 ```{r}
 parite_demographique <- compas2 %>%
   group_by(sex) %>%
   summarise(probability_high_risk = mean(risk_high == 1))
+par=parite_demographique$probability_high_risk[2]-parite_demographique$probability_high_risk[1]
 ggplot(parite_demographique, aes(x = sex, y = probability_high_risk, fill = sex)) +
   geom_bar(stat = "identity") +
   ggtitle("Parité démographique par sexe (decile_score)") +
   ylab("Probabilité d'un risque élevé")
 ```
-La parité démographique n'est toujours pas vérifié, une femme et un homme n'auront pas la même probabilité d'avoir un score élevé.
-
+La parité démographique est bien vérifiée, les proportions sont quasiment équivalente, la différence est `r par`
 ## Egalité des chances 
 
 ```{r}
@@ -140,12 +152,27 @@ model_equality_chances <- glm(risk_high ~ sex + priors_count + is_recid + two_ye
 summary(model_equality_chances)
 ```
 
-Nous voyons cette fois que la variabkle de sexe n'est plus significatif. L'égalité des chances est donc vérifié.
+Nous voyons encore que la variable de sexe est significative, cette fois elle est de l'odre e-5. L'égalité des chances n'est donc pas vérifiée, nous allons le voir avec le taux de faux positif et vrai positif.
 
+```{r}
+compas2 %>%
+  group_by(sex) %>%
+  summarise(
+    true_positive_rate = mean(risk_high == 1 & two_year_recid == 1),
+    false_positive_rate = mean(risk_high == 1 & two_year_recid == 0)
+  ) %>%
+  ggplot(aes(x = sex)) +
+  geom_bar(aes(y = true_positive_rate, fill = "True Positive Rate"), stat = "identity") +
+  geom_bar(aes(y = false_positive_rate, fill = "False Positive Rate"), stat = "identity") +
+  labs(title = "Égalité des chances ajustée : taux de vrais et faux positifs",
+       y = "Taux", fill = "fill") +
+  theme_minimal()
+```
+Aucun des 2 taux ne sont égaux, l'égalité des chances 
 
 # Conclusion :
 Avec le jeu de donnée "brut" (sans l'avoir débiaisé avec la méthode d'optimisation pré-processing) nous voyons 2 choses :
 - La parité démographique n'est pas totalement respectée car les hommes sont plus souvent classés à risque élevé que les femmes.
-- l'égalité des chances n'est pas vérifiée car la variable de genre est significative.
+- l'égalité des chances n'est pas vérifiée car la variable de genre est significative et le taux de vrai positif est différent selon le genre.
 Cela suggère que l'algorithme COMPAS pourrait être biaisé en fonction du sexe.
-Une fois que nous avons débiaisé le jeu de donnée, nous voyons que la parité démographique n'est toujours pas respectée alors que l'égalité des chances l'est. 
+Une fois que nous avons débiaisé le jeu de donnée, nous voyons que la parité démographique est presque vérifié mais l'égalité des chances toujours pas. Cela suggère que les 2 définitions se contrarient bien que définissant tous les 2 l'équité.
